@@ -1,10 +1,8 @@
 from http.server import BaseHTTPRequestHandler
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-import json
 import os
 import re
-
 import requests
 from bs4 import BeautifulSoup
 
@@ -13,9 +11,9 @@ TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 CHAT_ID = "-1004337354549"
 
 CELLSTRING_URL = "https://cellstring.com/moco/events"
-STATE_FILE = "sent_events.json"
 
 KZ = ZoneInfo("Asia/Almaty")
+UTC = ZoneInfo("UTC")
 
 
 def send_photo(image_url, text):
@@ -25,6 +23,7 @@ def send_photo(image_url, text):
         url,
         data={
             "chat_id": CHAT_ID,
+            "photo": image_url,
             "caption": text
         },
         timeout=30
@@ -51,11 +50,13 @@ def get_cellstring_text():
         "html.parser"
     )
 
-    return soup.get_text(" ", strip=True)
+    return soup.get_text(
+        " ",
+        strip=True
+    )
 
 
 def parse_events(text):
-
     pattern = (
         r'(\d{1,2}:\d{2}\s(?:AM|PM))\s+'
         r'(Double Chaos Energy|Overcharged Alert)\s+'
@@ -66,9 +67,7 @@ def parse_events(text):
 
     events = []
 
-    now = datetime.now(KZ)
-    current_date = now.date()
-
+    current_date = datetime.now(KZ).date()
     previous_time = None
 
     for time_text, event_name in matches:
@@ -89,8 +88,8 @@ def parse_events(text):
         event_datetime = datetime.combine(
             current_date,
             event_time,
-            tzinfo=KZ
-        )
+            tzinfo=UTC
+        ).astimezone(KZ)
 
         events.append({
             "datetime": event_datetime,
@@ -101,36 +100,6 @@ def parse_events(text):
     return events
 
 
-def load_sent():
-
-    try:
-        with open(
-            STATE_FILE,
-            "r",
-            encoding="utf-8"
-        ) as f:
-            return set(json.load(f))
-
-    except Exception:
-        return set()
-
-
-def save_sent(sent):
-
-    with open(
-        STATE_FILE,
-        "w",
-        encoding="utf-8"
-    ) as f:
-
-        json.dump(
-            list(sent),
-            f,
-            ensure_ascii=False,
-            indent=2
-        )
-
-
 def get_event_message(event_name):
 
     if event_name == "Double Chaos Energy":
@@ -138,7 +107,7 @@ def get_event_message(event_name):
         return (
             "https://raw.githubusercontent.com/"
             "make199221/moco-news-bot/main/x2.jpg",
-            "⚡ Двойная энергия хаоса уже началась!"
+            "⚡ Двойная энергия хаоса уже через 10 минут!"
         )
 
     if event_name == "Overcharged Alert":
@@ -146,7 +115,7 @@ def get_event_message(event_name):
         return (
             "https://raw.githubusercontent.com/"
             "make199221/moco-news-bot/main/overcharged.jpg",
-            "🔥 Сверхзаряженные монстры уже начались!"
+            "🔥 Сверхзаряженные монстры уже через 10 минут!"
         )
 
     return None, None
@@ -160,51 +129,43 @@ def check_events():
 
     now = datetime.now(KZ)
 
-    sent = load_sent()
+    results = []
 
     for event in events:
 
         event_datetime = event["datetime"]
 
-        seconds_left = (
+        minutes_left = (
             event_datetime - now
-        ).total_seconds()
+        ).total_seconds() / 60
 
-        minutes_left = seconds_left / 60
+        results.append({
+            "time": event["time"],
+            "name": event["name"],
+            "minutes_left": round(minutes_left, 2)
+        })
 
-        # Событие началось:
-        # от 0 до 1 минуты после начала
-        if 0 <= minutes_left <= 1:
-
-            key = (
-                f"{event_datetime.isoformat()}|"
-                f"{event['name']}"
-            )
-
-            if key in sent:
-                continue
+        # Уведомление примерно за 10 минут
+        if 9 <= minutes_left <= 10.5:
 
             image_url, message = get_event_message(
                 event["name"]
             )
 
-            if not image_url:
-                continue
+            if image_url:
 
-            send_photo(
-                image_url,
-                message
-            )
+                send_photo(
+                    image_url,
+                    message
+                )
 
-            sent.add(key)
+                print(
+                    f"📤 Отправлено: "
+                    f"{event['name']} "
+                    f"{event['time']}"
+                )
 
-            save_sent(sent)
-
-            print(
-                f"📤 Началось: "
-                f"{event['name']} "
-                f"{event['time']}"
-            )
+    return results
 
 
 class handler(BaseHTTPRequestHandler):
@@ -213,34 +174,45 @@ class handler(BaseHTTPRequestHandler):
 
         try:
 
-            check_events()
+            results = check_events()
+
+            body = {
+                "ok": True,
+                "message": "MoCo events checked",
+                "events": results
+            }
+
+            response = str(body).encode("utf-8")
 
             self.send_response(200)
 
             self.send_header(
                 "Content-Type",
-                "text/plain; charset=utf-8"
+                "application/json; charset=utf-8"
             )
 
             self.end_headers()
 
-            self.wfile.write(
-                b"MoCo events checked"
-            )
+            self.wfile.write(response)
 
         except Exception as e:
 
             print("ERROR:", e)
 
+            body = {
+                "ok": False,
+                "error": str(e)
+            }
+
+            response = str(body).encode("utf-8")
+
             self.send_response(500)
 
             self.send_header(
                 "Content-Type",
-                "text/plain; charset=utf-8"
+                "application/json; charset=utf-8"
             )
 
             self.end_headers()
 
-            self.wfile.write(
-                str(e).encode("utf-8")
-            )
+            self.wfile.write(response)
